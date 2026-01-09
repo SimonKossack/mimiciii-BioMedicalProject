@@ -1,0 +1,17 @@
+# Ignoriere Umgebungsvariablen / Passwörter
+.env
+.venv/
+env/
+
+# Ignoriere Python Cache und kompilierte Dateien
+__pycache__/
+*.pyc
+
+# Ignoriere IDE Einstellungen (optional)
+.vscode/
+.idea/
+
+# Falls du MIMIC CSV-Dateien lokal hast, ignoriere diese auch!
+# MIMIC Daten dürfen niemals veröffentlicht werden.
+*.csv
+data/
