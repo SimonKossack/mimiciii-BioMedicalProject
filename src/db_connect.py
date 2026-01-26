@@ -3,7 +3,15 @@ import pandas as pd
 from sqlalchemy import create_engine, text  # <--- WICHTIG: "text" importieren
 from dotenv import load_dotenv
 
-load_dotenv()
+# --- DIESER TEIL MUSS GEÄNDERT WERDEN ---
+# Wir suchen die .env Datei relativ zu dieser Datei (db_connect.py)
+# os.path.dirname(__file__) ist der 'src' Ordner
+# '..' geht eine Ebene hoch zum Hauptprojektordner
+current_dir = os.path.dirname(__file__)
+dotenv_path = os.path.join(current_dir, '..', '.env')
+
+load_dotenv(dotenv_path)
+# ---------------------------------------
 
 def get_engine():
     """Erstellt die Verbindung zur Datenbank."""
@@ -13,10 +21,21 @@ def get_engine():
     port = os.getenv("DB_PORT")
     db   = os.getenv("DB_NAME")
 
-    if not user or not pw:
-        raise ValueError("Fehler: .env Datei nicht gefunden oder leer!")
+    # WICHTIG: Wir entfernen 'not pw' aus der Fehlermeldung, 
+    # damit ein leeres Passwort erlaubt ist!
+    if not user:
+        raise ValueError(f"Fehler: DB_USER wurde in .env nicht gefunden!")
 
-    conn_str = f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}"
+    # Falls pw None ist (weil leer), machen wir einen leeren String daraus
+    if pw is None:
+        pw = ""
+
+    if pw:
+        conn_str = f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}"
+    else:
+        # Verbindung ohne Passwort
+        conn_str = f"postgresql+psycopg2://{user}@{host}:{port}/{db}"
+        
     return create_engine(conn_str)
 
 def load_sql(sql_path, params=None):
