@@ -122,6 +122,76 @@ def add_sofa_score(df_aki: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_sapsii_score(df_aki: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds SAPS II score columns from mimiciii_derived.sapsii table.
+    
+    Returns df with new columns:
+      - sapsii: Total SAPS II score
+      - sapsii_prob: Probability of mortality based on SAPS II
+      - sapsii_age_score: Age component
+      - sapsii_hr_score: Heart rate component
+      - sapsii_sysbp_score: Systolic BP component
+      - sapsii_temp_score: Temperature component
+      - sapsii_pao2fio2_score: PaO2/FiO2 component
+      - sapsii_uo_score: Urine output component
+      - sapsii_bun_score: BUN component
+      - sapsii_wbc_score: WBC component
+      - sapsii_potassium_score: Potassium component
+      - sapsii_sodium_score: Sodium component
+      - sapsii_bicarbonate_score: Bicarbonate component
+      - sapsii_bilirubin_score: Bilirubin component
+      - sapsii_gcs_score: GCS component
+      - sapsii_comorbidity_score: Comorbidity component
+      - sapsii_admissiontype_score: Admission type component
+    """
+    df = df_aki.copy()
+    
+    df_saps = q("""
+        SELECT icustay_id,
+               sapsii,
+               sapsii_prob,
+               age_score,
+               hr_score,
+               sysbp_score,
+               temp_score,
+               pao2fio2_score,
+               uo_score,
+               bun_score,
+               wbc_score,
+               potassium_score,
+               sodium_score,
+               bicarbonate_score,
+               bilirubin_score,
+               gcs_score,
+               comorbidity_score,
+               admissiontype_score
+        FROM mimiciii_derived.sapsii
+    """)
+    
+    # Rename columns explicitly to avoid confusion with other scores 
+    # (e.g., 'gcs_score' creates clarity vs just 'gcs' or potential overlaps)
+    df_saps = df_saps.rename(columns={
+        'age_score': 'sapsii_age_score',
+        'hr_score': 'sapsii_hr_score',
+        'sysbp_score': 'sapsii_sysbp_score',
+        'temp_score': 'sapsii_temp_score',
+        'pao2fio2_score': 'sapsii_pao2fio2_score',
+        'uo_score': 'sapsii_uo_score',
+        'bun_score': 'sapsii_bun_score',
+        'wbc_score': 'sapsii_wbc_score',
+        'potassium_score': 'sapsii_potassium_score',
+        'sodium_score': 'sapsii_sodium_score',
+        'bicarbonate_score': 'sapsii_bicarbonate_score',
+        'bilirubin_score': 'sapsii_bilirubin_score',
+        'gcs_score': 'sapsii_gcs_score',
+        'comorbidity_score': 'sapsii_comorbidity_score',
+        'admissiontype_score': 'sapsii_admissiontype_score'
+    })
+    
+    df = df.merge(df_saps, on='icustay_id', how='left')
+    return df
+
 def add_vasopressor_flags(df_aki: pd.DataFrame, window_hours: float = 24.0) -> pd.DataFrame:
     """
     Adds vasopressor flags (0/1) for early use within window_hours after ICU intime.

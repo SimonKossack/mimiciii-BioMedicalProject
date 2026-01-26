@@ -7,7 +7,7 @@ SET search_path TO mimiciii_derived, mimic, public;
 
 -- Load all dependencies
 \i sql/concepts_postgres/firstday/urine_output_first_day.sql
-\i sql/concepts_postgres/firstday/vitals_first_day.sqlF
+\i sql/concepts_postgres/firstday/vitals_first_day.sql
 \i sql/concepts_postgres/firstday/gcs_first_day.sql
 \i sql/concepts_postgres/firstday/labs_first_day.sql
 \i sql/concepts_postgres/firstday/blood_gas_first_day.sql
