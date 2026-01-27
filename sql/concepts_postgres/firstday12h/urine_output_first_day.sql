@@ -1,5 +1,5 @@
 -- THIS SCRIPT IS AUTOMATICALLY GENERATED. DO NOT EDIT IT DIRECTLY.
-DROP TABLE IF EXISTS urine_output_first_day; CREATE TABLE urine_output_first_day AS 
+DROP TABLE IF EXISTS urine_output_12h; CREATE TABLE urine_output_12h AS 
 -- ------------------------------------------------------------------
 -- Purpose: Create a view of the urine output for each ICUSTAY_ID over the first 24 hours.
 -- ------------------------------------------------------------------
@@ -21,7 +21,7 @@ left join outputevents oe
 -- join on all patient identifiers
 on ie.subject_id = oe.subject_id and ie.hadm_id = oe.hadm_id and ie.icustay_id = oe.icustay_id
 -- and ensure the data occurs during the first day
-and oe.charttime between ie.intime and (ie.intime + INTERVAL '1 day') -- first ICU day
+and oe.charttime between ie.intime and (ie.intime + INTERVAL '12 hour') -- first ICU day
 where itemid in
 (
 -- these are the most frequently occurring urine output observations in CareVue

@@ -1,5 +1,5 @@
 -- THIS SCRIPT IS AUTOMATICALLY GENERATED. DO NOT EDIT IT DIRECTLY.
-DROP TABLE IF EXISTS labs_first_day; CREATE TABLE labs_first_day AS 
+DROP TABLE IF EXISTS labs_12h; CREATE TABLE labs_12h AS 
 -- This query pivots lab values taken in the first 24 hours of a patient's stay
 
 -- Have already confirmed that the unit of measurement is always the same: null or the correct unit
@@ -118,7 +118,7 @@ FROM
 
   LEFT JOIN labevents le
     ON le.subject_id = ie.subject_id AND le.hadm_id = ie.hadm_id
-    AND le.charttime BETWEEN (DATETIME_SUB(ie.intime, INTERVAL '6' HOUR)) AND (DATETIME_ADD(ie.intime, INTERVAL '1' DAY))
+    AND le.charttime BETWEEN (DATETIME_SUB(ie.intime, INTERVAL '6' HOUR)) AND (DATETIME_ADD(ie.intime, INTERVAL '12' HOUR))
     AND le.ITEMID in
     (
       -- comment is: LABEL | CATEGORY | FLUID | NUMBER OF ROWS IN LABEVENTS

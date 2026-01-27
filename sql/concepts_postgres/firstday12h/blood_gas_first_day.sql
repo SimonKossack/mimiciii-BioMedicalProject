@@ -1,5 +1,5 @@
 -- THIS SCRIPT IS AUTOMATICALLY GENERATED. DO NOT EDIT IT DIRECTLY.
-DROP TABLE IF EXISTS blood_gas_6h; CREATE TABLE blood_gas_6h AS 
+DROP TABLE IF EXISTS blood_gas_12h; CREATE TABLE blood_gas_12h AS 
 -- The aim of this query is to pivot entries related to blood gases and
 -- chemistry values which were found in LABEVENTS
 
@@ -64,7 +64,7 @@ with pvt as
     FROM icustays ie
     left join labevents le
       on le.subject_id = ie.subject_id and le.hadm_id = ie.hadm_id
-      and le.charttime between (DATETIME_SUB(ie.intime, INTERVAL '6' HOUR)) and (DATETIME_ADD(ie.intime, INTERVAL '6' HOUR))
+      and le.charttime between (DATETIME_SUB(ie.intime, INTERVAL '6' HOUR)) and (DATETIME_ADD(ie.intime, INTERVAL '12' HOUR))
       and le.ITEMID in
       -- blood gases
       (

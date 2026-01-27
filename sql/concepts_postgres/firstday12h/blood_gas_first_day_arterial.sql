@@ -1,23 +1,27 @@
 -- THIS SCRIPT IS AUTOMATICALLY GENERATED. DO NOT EDIT IT DIRECTLY.
-DROP TABLE IF EXISTS blood_gas_first_day_arterial; CREATE TABLE blood_gas_first_day_arterial AS 
+DROP TABLE IF EXISTS blood_gas_12h_arterial; CREATE TABLE blood_gas_12h_arterial AS 
 
 with stg_spo2 as
 (
-  select subject_id, hadm_id, icustay_id, charttime
+  select ce.subject_id, ce.hadm_id, ce.icustay_id, ce.charttime
     -- max here is just used to group SpO2 by charttime
     , max(case when valuenum <= 0 or valuenum > 100 then null else valuenum end) as SpO2
-  FROM chartevents
+  FROM chartevents ce
+  -- NEU: Verknüpfung zur Aufnahmezeit
+  INNER JOIN icustays ie ON ce.icustay_id = ie.icustay_id 
   -- o2 sat
-  where ITEMID in
+  where ce.ITEMID in
   (
     646 -- SpO2
   , 220277 -- O2 saturation pulseoxymetry
   )
-  group by subject_id, hadm_id, icustay_id, charttime
+  -- NEU: Begrenzung auf die ersten 6 Stunden nach Aufnahme
+  AND ce.charttime BETWEEN ie.intime AND DATETIME_ADD(ie.intime, INTERVAL '12' HOUR)
+  group by ce.subject_id, ce.hadm_id, ce.icustay_id, ce.charttime
 )
 , stg_fio2 as
 (
-  select subject_id, hadm_id, icustay_id, charttime
+  select ce.subject_id, ce.hadm_id, ce.icustay_id, ce.charttime
     -- pre-process the FiO2s to ensure they are between 21-100%
     , max(
         case
@@ -25,7 +29,6 @@ with stg_spo2 as
             then case
               when valuenum > 0 and valuenum <= 1
                 then valuenum * 100
-              -- improperly input data - looks like O2 flow in litres
               when valuenum > 1 and valuenum < 21
                 then null
               when valuenum >= 21 and valuenum <= 100
@@ -39,8 +42,10 @@ with stg_spo2 as
             then valuenum * 100
       else null end
     ) as fio2_chartevents
-  FROM chartevents
-  where ITEMID in
+  FROM chartevents ce
+  -- NEU: Verknüpfung zur Aufnahmezeit
+  INNER JOIN icustays ie ON ce.icustay_id = ie.icustay_id
+  where ce.ITEMID in
   (
     3420 -- FiO2
   , 190 -- FiO2 set
@@ -48,15 +53,17 @@ with stg_spo2 as
   , 3422 -- FiO2 [measured]
   )
   -- exclude rows marked as error
-  AND (error IS NULL OR error = 0)
-  group by subject_id, hadm_id, icustay_id, charttime
+  AND (ce.error IS NULL OR ce.error = 0)
+  -- NEU: Begrenzung auf die ersten 6 Stunden nach Aufnahme
+  AND ce.charttime BETWEEN ie.intime AND DATETIME_ADD(ie.intime, INTERVAL '12' HOUR)
+  group by ce.subject_id, ce.hadm_id, ce.icustay_id, ce.charttime
 )
 , stg2 as
 (
 select bg.*
   , ROW_NUMBER() OVER (partition by bg.icustay_id, bg.charttime order by s1.charttime DESC) as lastRowSpO2
   , s1.spo2
-from blood_gas_first_day bg
+from blood_gas_12h bg
 left join stg_spo2 s1
   -- same patient
   on  bg.icustay_id = s1.icustay_id

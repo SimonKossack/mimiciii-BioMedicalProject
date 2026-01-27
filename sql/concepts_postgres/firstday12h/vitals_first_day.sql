@@ -1,5 +1,7 @@
 -- THIS SCRIPT IS AUTOMATICALLY GENERATED. DO NOT EDIT IT DIRECTLY.
-DROP TABLE IF EXISTS vitals_first_day; CREATE TABLE vitals_first_day AS 
+-- Ändere die Zeile oben in:
+DROP TABLE IF EXISTS mimiciii_derived.vitals_12h CASCADE; 
+CREATE TABLE mimiciii_derived.vitals_12h AS 
 -- This query pivots the vital signs for the first 24 hours of a patient's stay
 -- Vital signs include heart rate, blood pressure, respiration rate, and temperature
 
@@ -51,9 +53,9 @@ FROM  (
   from icustays ie
   left join chartevents ce
   on ie.icustay_id = ce.icustay_id
-  and ce.charttime between ie.intime and DATETIME_ADD(ie.intime, INTERVAL '1' DAY)
+  and ce.charttime between ie.intime and DATETIME_ADD(ie.intime, INTERVAL '6' HOUR)
   and DATETIME_DIFF(ce.charttime, ie.intime, 'SECOND') > 0
-  and DATETIME_DIFF(ce.charttime, ie.intime, 'HOUR') <= 24
+  and DATETIME_DIFF(ce.charttime, ie.intime, 'HOUR') <= 12
   -- exclude rows marked as error
   and (ce.error IS NULL or ce.error = 0)
   where ce.itemid in
