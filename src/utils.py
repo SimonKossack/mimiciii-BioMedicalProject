@@ -539,7 +539,7 @@ import numpy as np
 def add_rrt_persistence_near_discharge(
     df_aki: pd.DataFrame,
     hours_before_discharge: float = 6.0,
-    min_overlap_hours: float = 3.0,
+    min_overlap_hours: float = 5.0,
     gap_tolerance_hours: float = 2.0,
     include_inputevents: bool = True,
 ) -> pd.DataFrame:
@@ -767,6 +767,108 @@ def recode_ethnicity(df: pd.DataFrame) -> pd.DataFrame:
 
     df["ethnicity_grp"] = df["ethnicity"].apply(_map_eth)
     return df
+# ============================================================
+# Intervention flags: fluids & diuretics (early + anytime)
+# ============================================================
+
+from src.db import q
+import pandas as pd
+
+# --- Pattern definitions (central, reusable)
+DIURETIC_PATTERNS = [
+    "%furosemide%", "%lasix%",
+    "%bumetanide%",
+    "%torsemide%",
+    "%chlorothiazide%",
+    "%metolazone%",
+    "%mannitol%",
+    "%acetazolamide%",
+    "%spironolactone%",
+]
+
+FLUID_PATTERNS = [
+    "%normal saline%", "%0.9%saline%", "%saline%",
+    "%lactated ring%", "%ringer%",
+    "%plasmalyte%", "%plasma-lyte%",
+    "%d5w%", "%dextrose%",
+    "%albumin%",
+    "%hetastarch%", "%starch%",
+    "%packed red%", "%prbc%", "%red blood cell%",
+    "%fresh frozen plasma%", "%ffp%",
+    "%platelet%",
+]
 
 
+def add_inputevents_flag(
+    df_aki: pd.DataFrame,
+    col_early: str,
+    patterns: list[str],
+    window_hours: float = 24.0,
+    col_any: str | None = None,
+) -> pd.DataFrame:
+    df = df_aki.copy()
 
+    where = " OR ".join([f"LOWER(di.label) LIKE '{p}'" for p in patterns])
+
+    ev = q(f"""
+        SELECT ie.icustay_id, ie.starttime
+        FROM inputevents_mv ie
+        JOIN d_items di ON ie.itemid = di.itemid
+        WHERE {where}
+    """)
+
+    if len(ev) == 0:
+        df[col_early] = 0
+        if col_any:
+            df[col_any] = 0
+        return df
+
+    if col_any:
+        any_ids = ev["icustay_id"].dropna().unique()
+        df[col_any] = df["icustay_id"].isin(any_ids).astype(int)
+
+    ev = ev.merge(
+        df[["icustay_id", "intime"]],
+        on="icustay_id",
+        how="inner"
+    ).dropna(subset=["intime", "starttime"])
+
+    ev["hours_since_icu"] = (
+        ev["starttime"] - ev["intime"]
+    ).dt.total_seconds() / 3600
+
+    ev = ev[(ev["hours_since_icu"] >= 0) & (ev["hours_since_icu"] <= window_hours)]
+
+    early_ids = ev["icustay_id"].unique()
+    df[col_early] = df["icustay_id"].isin(early_ids).astype(int)
+
+    if col_any and col_any not in df.columns:
+        df[col_any] = 0
+
+    return df
+
+
+def add_early_fluid_flag(
+    df_aki: pd.DataFrame,
+    window_hours: float = 24.0
+) -> pd.DataFrame:
+    return add_inputevents_flag(
+        df_aki,
+        col_early="early_fluid",
+        col_any="any_fluid",
+        patterns=FLUID_PATTERNS,
+        window_hours=window_hours,
+    )
+
+
+def add_early_diuretic_flag(
+    df_aki: pd.DataFrame,
+    window_hours: float = 24.0
+) -> pd.DataFrame:
+    return add_inputevents_flag(
+        df_aki,
+        col_early="early_diuretic",
+        col_any="any_diuretic",
+        patterns=DIURETIC_PATTERNS,
+        window_hours=window_hours,
+    )
