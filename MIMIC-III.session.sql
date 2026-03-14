@@ -1,0 +1,1 @@
+SELECT * FROM gcs_first_day LIMIT 10;
