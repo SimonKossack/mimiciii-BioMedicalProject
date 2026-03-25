@@ -930,7 +930,7 @@ def get_labs_for_window(
 
     result = (
         merged.groupby(["icustay_id", "lab"])
-        .apply(_agg_fn, include_groups=False)
+        .apply(_agg_fn)
         .unstack("lab")
     )
 
@@ -1014,7 +1014,7 @@ def get_vitals_for_window(
 
     result = (
         merged.groupby(["icustay_id", "vital"])
-        .apply(_agg_fn, include_groups=False)
+        .apply(_agg_fn)
         .unstack("vital")
     )
 
