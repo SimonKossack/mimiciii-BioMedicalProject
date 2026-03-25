@@ -1,6 +1,7 @@
 # src/utils.py
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 from src.db import q
 
@@ -294,8 +295,6 @@ def add_mechanical_ventilation_flag(df_aki: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-import pandas as pd
-
 def add_early_late_dialysis_flags(
     df_aki: pd.DataFrame,
     window_hours: float = 24.0,
@@ -449,8 +448,6 @@ def extract_dialysis_timing(df_aki: pd.DataFrame) -> pd.DataFrame:
     return df.merge(agg, on="icustay_id", how="left")
 
 
-import pandas as pd
-
 def add_dialysis_near_icu_discharge_flag(
     df_aki: pd.DataFrame,
     hours_before_discharge: float = 6.0,
@@ -540,10 +537,6 @@ def add_dialysis_near_icu_discharge_flag(
 
     return df
 
-
-
-import pandas as pd
-import numpy as np
 
 def add_rrt_persistence_near_discharge(
     df_aki: pd.DataFrame,
@@ -699,60 +692,6 @@ def add_rrt_persistence_near_discharge(
     return df
 
 
-import pandas as pd
-
-def add_dialysis_dependent_at_discharge_flag(df_aki: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds 'dialysis_dependent_discharge' flag (0/1) on HADM_ID level using ICD-9 diagnosis codes.
-
-    Definition ("dialysepflichtig bei Entlassung" / dialysis-dependent status):
-      - V45.11  Renal dialysis status
-      - 585.6   End stage renal disease (ESRD)
-      - V56.0 / V56.1 / V56.2  Encounter for dialysis / fitting & adjustment / other dialysis care
-
-    Implementation details:
-      - MIMIC-III diagnoses are in diagnoses_icd.icd9_code and often stored WITHOUT dots
-        e.g., "V4511", "5856", "V560", "V561", "V562".
-      - We therefore match both dotted and non-dotted representations by normalizing (remove '.').
-
-    Requires df_aki to contain: hadm_id
-    """
-
-    df = df_aki.copy()
-
-    if "hadm_id" not in df.columns:
-        raise ValueError("df_aki fehlt Spalte 'hadm_id'.")
-
-    # Target ICD-9 codes (normalized: no dots)
-    target_codes = {"V4511", "5856", "V560", "V561", "V562"}
-
-    # Pull diagnosis codes for relevant admissions only (faster)
-    hadm_ids = tuple(df["hadm_id"].dropna().astype(int).unique().tolist())
-    if len(hadm_ids) == 0:
-        df["dialysis_dependent_discharge"] = 0
-        return df
-
-    # If only one hadm_id, tuple formatting in SQL IN (...) can be tricky; handle it
-    in_clause = f"({hadm_ids[0]})" if len(hadm_ids) == 1 else str(hadm_ids)
-
-    dx = q(f"""
-        SELECT hadm_id, icd9_code
-        FROM diagnoses_icd
-        WHERE hadm_id IN {in_clause}
-          AND icd9_code IS NOT NULL
-    """)
-
-    # Normalize: remove dots, uppercase
-    dx["code_norm"] = dx["icd9_code"].astype(str).str.replace(".", "", regex=False).str.upper()
-
-    hadm_flagged = dx.loc[dx["code_norm"].isin(target_codes), "hadm_id"].unique()
-
-    df["dialysis_dependent_discharge"] = df["hadm_id"].isin(hadm_flagged).astype(int)
-    return df
-
-
-import pandas as pd
-
 def recode_ethnicity(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds a new column 'ethnicity_grp' to df based on df['ethnicity'].
@@ -779,9 +718,6 @@ def recode_ethnicity(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 # Intervention flags: fluids & diuretics (early + anytime)
 # ============================================================
-
-from src.db import q
-import pandas as pd
 
 # --- Pattern definitions (central, reusable)
 DIURETIC_PATTERNS = [
@@ -886,9 +822,6 @@ def add_early_diuretic_flag(
 # ============================================================
 # Flexible time-window functions (raw MIMIC-III tables)
 # ============================================================
-
-import numpy as np
-
 
 # -- Lab ItemIDs used across MIMIC-III (labevents) -----------
 _LAB_ITEMS = {
