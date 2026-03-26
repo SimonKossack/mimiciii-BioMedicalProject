@@ -295,6 +295,194 @@ def add_mechanical_ventilation_flag(df_aki: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _run_first_successful_query(sql_queries: list[str], required_cols: list[str]) -> pd.DataFrame:
+    """
+    Execute SQL statements in order and return the first result containing
+    all required columns.
+    """
+    for sql in sql_queries:
+        try:
+            res = q(sql)
+            if all(c in res.columns for c in required_cols):
+                return res
+        except Exception:
+            continue
+
+    return pd.DataFrame(columns=required_cols)
+
+
+def add_kdigo_stage(
+    df_aki: pd.DataFrame,
+    col_name: str = "aki_stage",
+) -> pd.DataFrame:
+    """
+    Add KDIGO AKI stage per ICU stay.
+
+    This tries multiple common concept tables/schemas and uses the first
+    available source. If a dedicated first-6h summary table
+    (``kdigo_stage_first6h``) exists, it is preferred.
+    Output is merged by ``icustay_id`` and written to ``col_name``.
+    """
+    df = df_aki.copy()
+
+    if "icustay_id" not in df.columns:
+        raise ValueError("df_aki muss 'icustay_id' enthalten.")
+
+    kdigo_queries = [
+        """
+        SELECT icustay_id, aki_stage_6h AS aki_stage
+        FROM kdigo_stage_first6h
+        """,
+        """
+        SELECT icustay_id, aki_stage_48hr AS aki_stage
+        FROM kdigo_stages_48hr
+        """,
+        """
+        SELECT icustay_id, aki_stage_7day AS aki_stage
+        FROM kdigo_stages_7day
+        """,
+        """
+        SELECT icustay_id, MAX(aki_stage) AS aki_stage
+        FROM kdigo_stages
+        GROUP BY icustay_id
+        """,
+        """
+        SELECT icustay_id, MAX(aki_stage) AS aki_stage
+        FROM mimiciii_derived.kdigo_stages
+        GROUP BY icustay_id
+        """,
+        """
+        SELECT stay_id AS icustay_id, MAX(aki_stage) AS aki_stage
+        FROM mimiciv_derived.kdigo_stages
+        GROUP BY stay_id
+        """,
+    ]
+
+    kdigo = _run_first_successful_query(
+        sql_queries=kdigo_queries,
+        required_cols=["icustay_id", "aki_stage"],
+    )
+
+    if kdigo.empty:
+        df[col_name] = np.nan
+        return df
+
+    kdigo = kdigo[["icustay_id", "aki_stage"]].drop_duplicates(subset=["icustay_id"])
+    kdigo["aki_stage"] = pd.to_numeric(kdigo["aki_stage"], errors="coerce")
+
+    df = df.merge(kdigo, on="icustay_id", how="left")
+    if col_name != "aki_stage":
+        df = df.rename(columns={"aki_stage": col_name})
+
+    return df
+
+
+def add_sepsis_flag(
+    df_aki: pd.DataFrame,
+    col_name: str = "sepsis",
+) -> pd.DataFrame:
+    """
+    Add sepsis yes/no flag.
+
+    This tries multiple concept definitions (6h summary table, Sepsis-3,
+    Angus, Martin, Explicit) and merges by ``icustay_id`` when available,
+    otherwise by ``hadm_id``.
+    """
+    df = df_aki.copy()
+
+    if "icustay_id" not in df.columns and "hadm_id" not in df.columns:
+        raise ValueError("df_aki muss mindestens 'icustay_id' oder 'hadm_id' enthalten.")
+
+    sepsis_queries = [
+        """
+        SELECT icustay_id, COALESCE(sepsis_6h, sepsis_any_hosp) AS sepsis
+        FROM sepsis_flag_first6h
+        """,
+        """
+        SELECT icustay_id, MAX(CASE WHEN sepsis3 THEN 1 ELSE 0 END) AS sepsis
+        FROM sepsis3
+        GROUP BY icustay_id
+        """,
+        """
+        SELECT icustay_id, MAX(CASE WHEN sepsis3 THEN 1 ELSE 0 END) AS sepsis
+        FROM mimiciii_derived.sepsis3
+        GROUP BY icustay_id
+        """,
+        """
+        SELECT hadm_id, MAX(sepsis) AS sepsis
+        FROM angus
+        GROUP BY hadm_id
+        """,
+        """
+        SELECT hadm_id, MAX(sepsis) AS sepsis
+        FROM martin
+        GROUP BY hadm_id
+        """,
+        """
+        SELECT hadm_id, MAX(sepsis) AS sepsis
+        FROM explicit
+        GROUP BY hadm_id
+        """,
+        """
+        SELECT hadm_id, MAX(angus) AS sepsis
+        FROM angus
+        GROUP BY hadm_id
+        """,
+    ]
+
+    sepsis_df = _run_first_successful_query(
+        sql_queries=sepsis_queries,
+        required_cols=["sepsis"],
+    )
+
+    if sepsis_df.empty:
+        df[col_name] = np.nan
+        return df
+
+    if "icustay_id" in sepsis_df.columns and "icustay_id" in df.columns:
+        tmp = sepsis_df[["icustay_id", "sepsis"]].drop_duplicates(subset=["icustay_id"])
+        df = df.merge(tmp, on="icustay_id", how="left")
+    elif "hadm_id" in sepsis_df.columns and "hadm_id" in df.columns:
+        tmp = sepsis_df[["hadm_id", "sepsis"]].drop_duplicates(subset=["hadm_id"])
+        df = df.merge(tmp, on="hadm_id", how="left")
+    else:
+        df[col_name] = np.nan
+        return df
+
+    if col_name != "sepsis":
+        df = df.rename(columns={"sepsis": col_name})
+
+    sepsis_num = pd.to_numeric(df[col_name], errors="coerce")
+    df[col_name] = np.where(sepsis_num.notna(), (sepsis_num > 0).astype(float), np.nan)
+    return df
+
+
+def add_first6h_baseline_confounders(
+    df_aki: pd.DataFrame,
+    kdigo_col: str = "aki_stage",
+    sepsis_col: str = "sepsis",
+    ventilation_col: str = "mechanical_ventilation",
+) -> pd.DataFrame:
+    """
+    Convenience helper to enrich a cohort with baseline confounders used in
+    the 6h landmark design.
+
+    Adds/updates:
+      - KDIGO stage via ``add_kdigo_stage`` (prefers kdigo_stage_first6h)
+      - Sepsis flag via ``add_sepsis_flag`` (prefers sepsis_flag_first6h)
+      - Mechanical ventilation flag via ``add_mechanical_ventilation_flag``
+    """
+    df = df_aki.copy()
+    df = add_kdigo_stage(df, col_name=kdigo_col)
+    df = add_sepsis_flag(df, col_name=sepsis_col)
+    df = add_mechanical_ventilation_flag(df)
+
+    if ventilation_col != "mechanical_ventilation" and "mechanical_ventilation" in df.columns:
+        df = df.rename(columns={"mechanical_ventilation": ventilation_col})
+
+    return df
+
+
 def add_early_late_dialysis_flags(
     df_aki: pd.DataFrame,
     window_hours: float = 24.0,
@@ -1132,6 +1320,381 @@ def get_urine_output_for_window(
     return df_cohort.merge(uo_total, on="icustay_id", how="left")
 
 
+def get_vasopressor_features_for_window(
+    df_cohort: pd.DataFrame,
+    window_hours: float = 24.0,
+    end_hours_col: str | None = None,
+) -> pd.DataFrame:
+    """
+    Retrieve vasopressor/inotrope exposure within a time window and derive
+    coarse dose features usable for SOFA cardiovascular scoring.
+
+    Returns one row per icustay_id with:
+      - vaso_any_<suffix>, dopamine_any_<suffix>, dobutamine_any_<suffix>,
+        norepinephrine_any_<suffix>, epinephrine_any_<suffix>,
+        phenylephrine_any_<suffix>, vasopressin_any_<suffix>
+      - dopamine_rate_mcgkgmin_<suffix>, norepinephrine_rate_mcgkgmin_<suffix>,
+        epinephrine_rate_mcgkgmin_<suffix>
+    """
+    df = df_cohort.copy()
+    icu_ids = tuple(df["icustay_id"].dropna().astype(int).unique().tolist())
+    sfx = "_t_star" if end_hours_col is not None else f"_{int(window_hours)}h"
+
+    out_cols = [
+        f"vaso_any{sfx}",
+        f"dopamine_any{sfx}",
+        f"dobutamine_any{sfx}",
+        f"norepinephrine_any{sfx}",
+        f"epinephrine_any{sfx}",
+        f"phenylephrine_any{sfx}",
+        f"vasopressin_any{sfx}",
+        f"dopamine_rate_mcgkgmin{sfx}",
+        f"norepinephrine_rate_mcgkgmin{sfx}",
+        f"epinephrine_rate_mcgkgmin{sfx}",
+    ]
+
+    if not icu_ids:
+        for c in out_cols:
+            df[c] = np.nan
+        return df
+
+    in_clause = f"({icu_ids[0]})" if len(icu_ids) == 1 else str(icu_ids)
+
+    ev = q(f"""
+        SELECT
+            ie.icustay_id,
+            ie.starttime,
+            ie.rate,
+            ie.rateuom,
+            LOWER(di.label) AS label
+        FROM inputevents_mv ie
+        JOIN d_items di ON ie.itemid = di.itemid
+        WHERE ie.icustay_id IN {in_clause}
+          AND (
+               LOWER(di.label) LIKE '%norepinephrine%'
+            OR (LOWER(di.label) LIKE '%epinephrine%' AND LOWER(di.label) NOT LIKE '%norepi%')
+            OR LOWER(di.label) LIKE '%dopamine%'
+            OR LOWER(di.label) LIKE '%dobutamine%'
+            OR LOWER(di.label) LIKE '%phenylephrine%'
+            OR LOWER(di.label) LIKE '%vasopressin%'
+          )
+    """)
+
+    if ev.empty:
+        for c in out_cols:
+            df[c] = 0.0 if c.endswith(f"_any{sfx}") else np.nan
+        return df
+
+    merge_cols = ["icustay_id", "intime"]
+    if end_hours_col is not None:
+        if end_hours_col not in df.columns:
+            raise ValueError(
+                f"Spalte '{end_hours_col}' fehlt in df_cohort. "
+                f"Sie sollte den patientenspezifischen Fensterende in Stunden enthalten."
+            )
+        merge_cols.append(end_hours_col)
+
+    ev = ev.merge(df[merge_cols].drop_duplicates(), on="icustay_id", how="inner")
+    ev["starttime"] = pd.to_datetime(ev["starttime"])
+    ev["intime"] = pd.to_datetime(ev["intime"])
+    ev["hours"] = (ev["starttime"] - ev["intime"]).dt.total_seconds() / 3600
+
+    if end_hours_col is not None:
+        ev = ev[(ev["hours"] >= 0) & (ev["hours"] <= ev[end_hours_col])].copy()
+    else:
+        ev = ev[(ev["hours"] >= 0) & (ev["hours"] <= window_hours)].copy()
+
+    if ev.empty:
+        for c in out_cols:
+            df[c] = 0.0 if c.endswith(f"_any{sfx}") else np.nan
+        return df
+
+    def _drug_from_label(lbl: str) -> str:
+        l = str(lbl).lower()
+        if "norepinephrine" in l:
+            return "norepinephrine"
+        if "epinephrine" in l and "norepi" not in l:
+            return "epinephrine"
+        if "dobutamine" in l:
+            return "dobutamine"
+        if "dopamine" in l:
+            return "dopamine"
+        if "phenylephrine" in l:
+            return "phenylephrine"
+        if "vasopressin" in l:
+            return "vasopressin"
+        return "other"
+
+    def _to_mcgkgmin(rate: float, uom: str) -> float:
+        if pd.isna(rate) or pd.isna(uom):
+            return np.nan
+        u = str(uom).lower().replace(" ", "")
+        if "mcg/kg/min" in u or "mcg/kg/minute" in u:
+            return float(rate)
+        return np.nan
+
+    ev["drug"] = ev["label"].map(_drug_from_label)
+    ev["rate_mcgkgmin"] = [
+        _to_mcgkgmin(r, u) for r, u in zip(ev["rate"], ev["rateuom"])
+    ]
+
+    by_icu = ev.groupby("icustay_id")
+    out = pd.DataFrame({"icustay_id": by_icu.size().index})
+
+    # Any exposure flags per class.
+    for drug in ["dopamine", "dobutamine", "norepinephrine", "epinephrine", "phenylephrine", "vasopressin"]:
+        drug_ids = ev.loc[ev["drug"] == drug, "icustay_id"].dropna().unique()
+        out[f"{drug}_any{sfx}"] = out["icustay_id"].isin(drug_ids).astype(float)
+
+    out[f"vaso_any{sfx}"] = (
+        out[f"dopamine_any{sfx}"]
+        + out[f"dobutamine_any{sfx}"]
+        + out[f"norepinephrine_any{sfx}"]
+        + out[f"epinephrine_any{sfx}"]
+        + out[f"phenylephrine_any{sfx}"]
+        + out[f"vasopressin_any{sfx}"]
+    ).gt(0).astype(float)
+
+    # Rate features (only where unit is already mcg/kg/min).
+    for drug in ["dopamine", "norepinephrine", "epinephrine"]:
+        tmp = (
+            ev.loc[ev["drug"] == drug, ["icustay_id", "rate_mcgkgmin"]]
+            .groupby("icustay_id", as_index=False)["rate_mcgkgmin"]
+            .max()
+            .rename(columns={"rate_mcgkgmin": f"{drug}_rate_mcgkgmin{sfx}"})
+        )
+        out = out.merge(tmp, on="icustay_id", how="left")
+
+    for c in out_cols:
+        if c not in out.columns:
+            out[c] = 0.0 if c.endswith(f"_any{sfx}") else np.nan
+
+    return df.merge(out[["icustay_id"] + out_cols], on="icustay_id", how="left")
+
+
+def summarize_map_coverage(
+    df_cohort: pd.DataFrame,
+    windows_hours: tuple[int, ...] = (6, 24),
+) -> pd.DataFrame:
+    """
+    Summarize availability of MAP measurements across fixed time windows.
+
+    Returns one row per requested window with counts and percentages.
+    """
+    if "icustay_id" not in df_cohort.columns or "intime" not in df_cohort.columns:
+        raise ValueError("df_cohort muss mindestens 'icustay_id' und 'intime' enthalten.")
+
+    base = df_cohort[["icustay_id", "intime"]].drop_duplicates().copy()
+    n_total = len(base)
+    rows: list[dict[str, float]] = []
+
+    for w in windows_hours:
+        d = get_vitals_for_window(base, window_hours=float(w), agg="worst", end_hours_col=None)
+        col = f"mbp_{int(w)}h"
+        n_map = int(d[col].notna().sum()) if col in d.columns else 0
+        pct = (100.0 * n_map / n_total) if n_total > 0 else np.nan
+        rows.append(
+            {
+                "window_hours": int(w),
+                "n_total": int(n_total),
+                "n_with_map": int(n_map),
+                "map_coverage_pct": float(pct),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def pick_first_existing_column(
+    df: pd.DataFrame,
+    candidates: list[str],
+) -> str | None:
+    """Return the first column from candidates that exists in df."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _coerce_binary_series(s: pd.Series) -> pd.Series:
+    """Coerce common binary encodings to float {0.0, 1.0} (NaN if unknown)."""
+    if s.dtype == bool:
+        return s.astype(float)
+
+    num = pd.to_numeric(s, errors="coerce")
+    if num.notna().mean() > 0.8:
+        return (num > 0).astype(float)
+
+    txt = s.astype(str).str.strip().str.lower()
+    out = pd.Series(np.nan, index=s.index, dtype=float)
+    out[txt.isin({"1", "true", "yes", "y", "ja", "vent", "sepsis"})] = 1.0
+    out[txt.isin({"0", "false", "no", "n", "nein", "none", "nan"})] = 0.0
+    return out
+
+
+def _coerce_kdigo_stage_series(s: pd.Series) -> pd.Series:
+    """
+    Coerce KDIGO/AKI stage representations to numeric stage values.
+
+    Supports direct numeric values and text containing stage digits (0-3).
+    """
+    num = pd.to_numeric(s, errors="coerce")
+    if num.notna().mean() > 0.8:
+        return num
+
+    txt = s.astype(str).str.lower()
+    extracted = txt.str.extract(r"([0-3])", expand=False)
+    return pd.to_numeric(extracted, errors="coerce")
+
+
+def build_mandatory_matching_confounders(
+    df: pd.DataFrame,
+    source_df: pd.DataFrame | None = None,
+    id_col: str = "icustay_id",
+    strict: bool = True,
+) -> tuple[pd.DataFrame, dict[str, str | None], list[str]]:
+    """
+    Build canonical mandatory confounders for matching.
+
+    Mandatory set (canonical output columns):
+      - KDIGO stage: ``match_kdigo_stage``
+      - SOFA cardiovascular: ``match_sofa_cardio``
+      - MAP 6h: ``match_map_6h``
+      - Sepsis yes/no: ``match_sepsis``
+      - Ventilation yes/no: ``match_ventilation``
+      - Age: ``match_age``
+
+    The function searches first in ``df`` and then in ``source_df`` (if provided),
+    using common candidate column names. If ``strict=True`` and one of the six
+    mandatory variables cannot be mapped, a ValueError is raised.
+
+    Returns
+    -------
+    df_out : pd.DataFrame
+        Copy of df with canonical ``match_*`` columns added.
+    used_mapping : dict[str, str | None]
+        Mapping from canonical variable key to detected source column name.
+    missing_required : list[str]
+        Canonical keys that could not be mapped.
+    """
+    df_out = df.copy()
+
+    if source_df is not None:
+        if id_col not in df_out.columns or id_col not in source_df.columns:
+            raise ValueError(f"'{id_col}' muss in df und source_df vorhanden sein.")
+        merged_src = source_df.drop_duplicates(subset=[id_col]).copy()
+    else:
+        merged_src = None
+
+    candidate_map: dict[str, list[str]] = {
+        "kdigo_stage": [
+            "aki_stage_6h",
+            "aki_stage",
+            "kdigo_stage",
+            "kdigo",
+            "kdigo_max",
+            "match_kdigo_stage",
+        ],
+        "sofa_cardio": [
+            "sofa_cardiovascular_6h",
+            "sofa_cardiovascular",
+            "sofa_cardiovascular_24h",
+            "match_sofa_cardio",
+        ],
+        "map_6h": [
+            "mbp_6h",
+            "map_6h",
+            "mbp",
+            "map",
+            "match_map_6h",
+        ],
+        "sepsis": [
+            "sepsis_6h",
+            "sepsis_any_hosp",
+            "sepsis",
+            "sepsis_flag",
+            "is_sepsis",
+            "septic_shock",
+            "match_sepsis",
+        ],
+        "ventilation": [
+            "mechanical_ventilation",
+            "ventilation",
+            "ventilated",
+            "is_ventilated",
+            "match_ventilation",
+        ],
+        "age": [
+            "age",
+            "anchor_age",
+            "admission_age",
+            "match_age",
+        ],
+    }
+
+    out_col_map = {
+        "kdigo_stage": "match_kdigo_stage",
+        "sofa_cardio": "match_sofa_cardio",
+        "map_6h": "match_map_6h",
+        "sepsis": "match_sepsis",
+        "ventilation": "match_ventilation",
+        "age": "match_age",
+    }
+
+    used_mapping: dict[str, str | None] = {}
+    missing_required: list[str] = []
+
+    for key, candidates in candidate_map.items():
+        src_col = pick_first_existing_column(df_out, candidates)
+
+        if src_col is None and merged_src is not None:
+            src_col = pick_first_existing_column(merged_src, candidates)
+            if src_col is not None and src_col != id_col:
+                df_out = df_out.merge(
+                    merged_src[[id_col, src_col]],
+                    on=id_col,
+                    how="left",
+                    suffixes=("", "_src"),
+                )
+
+        used_mapping[key] = src_col
+        target_col = out_col_map[key]
+
+        if src_col is None:
+            df_out[target_col] = np.nan
+            missing_required.append(key)
+            continue
+
+        raw = df_out[src_col]
+        if key in {"sepsis", "ventilation"}:
+            df_out[target_col] = _coerce_binary_series(raw)
+        elif key == "kdigo_stage":
+            df_out[target_col] = _coerce_kdigo_stage_series(raw)
+        else:
+            df_out[target_col] = pd.to_numeric(raw, errors="coerce")
+
+    if strict and missing_required:
+        miss = ", ".join(missing_required)
+        raise ValueError(
+            "Pflicht-Confounder fehlen und konnten nicht gemappt werden: "
+            f"{miss}. Bitte Spalten in df/source_df bereitstellen oder Candidate-Listen erweitern."
+        )
+
+    return df_out, used_mapping, missing_required
+
+
+def get_mandatory_matching_columns() -> list[str]:
+    """Canonical mandatory confounder columns used for strict matching."""
+    return [
+        "match_kdigo_stage",
+        "match_sofa_cardio",
+        "match_map_6h",
+        "match_sepsis",
+        "match_ventilation",
+        "match_age",
+    ]
+
+
 def compute_sofa_from_raw(
     df_cohort: pd.DataFrame,
     window_hours: float = 24.0,
@@ -1204,14 +1767,53 @@ def compute_sofa_from_raw(
     else:
         df[f"sofa_liver{sfx}"] = np.nan
 
-    # --- Cardiovascular (MAP; vasopressors not included for simplicity) ---
-    if mbp_col in df.columns:
-        df[f"sofa_cardiovascular{sfx}"] = np.where(
-            df[mbp_col] < 70, 1, 0
-        )
-        df.loc[df[mbp_col].isna(), f"sofa_cardiovascular{sfx}"] = np.nan
-    else:
-        df[f"sofa_cardiovascular{sfx}"] = np.nan
+    # --- Cardiovascular (MAP + vasopressor/inotrope support) ---
+    df = get_vasopressor_features_for_window(
+        df,
+        window_hours=window_hours,
+        end_hours_col=end_hours_col,
+    )
+    cardio_col = f"sofa_cardiovascular{sfx}"
+
+    map_val = pd.to_numeric(df.get(mbp_col), errors="coerce") if mbp_col in df.columns else pd.Series(np.nan, index=df.index)
+    vaso_any = pd.to_numeric(df.get(f"vaso_any{sfx}"), errors="coerce").fillna(0)
+    dop_any = pd.to_numeric(df.get(f"dopamine_any{sfx}"), errors="coerce").fillna(0)
+    dobut_any = pd.to_numeric(df.get(f"dobutamine_any{sfx}"), errors="coerce").fillna(0)
+    norepi_any = pd.to_numeric(df.get(f"norepinephrine_any{sfx}"), errors="coerce").fillna(0)
+    epi_any = pd.to_numeric(df.get(f"epinephrine_any{sfx}"), errors="coerce").fillna(0)
+    vasopressin_any = pd.to_numeric(df.get(f"vasopressin_any{sfx}"), errors="coerce").fillna(0)
+    phenyl_any = pd.to_numeric(df.get(f"phenylephrine_any{sfx}"), errors="coerce").fillna(0)
+
+    dop_rate = pd.to_numeric(df.get(f"dopamine_rate_mcgkgmin{sfx}"), errors="coerce")
+    norepi_rate = pd.to_numeric(df.get(f"norepinephrine_rate_mcgkgmin{sfx}"), errors="coerce")
+    epi_rate = pd.to_numeric(df.get(f"epinephrine_rate_mcgkgmin{sfx}"), errors="coerce")
+
+    cardio = pd.Series(0.0, index=df.index)
+
+    # Score 1: MAP < 70 mmHg
+    cardio = cardio.where(~(map_val < 70), 1.0)
+
+    # Score 2: any vasoactive/inotropic support without high-dose evidence
+    score2 = (dop_any > 0) | (dobut_any > 0) | (norepi_any > 0) | (epi_any > 0) | (vasopressin_any > 0) | (phenyl_any > 0)
+    cardio = cardio.where(~score2, 2.0)
+
+    # Score 3: moderate catecholamine dose (when unit allows mcg/kg/min interpretation)
+    score3 = (
+        ((dop_rate > 5) & (dop_rate <= 15))
+        | ((norepi_rate > 0) & (norepi_rate <= 0.1))
+        | ((epi_rate > 0) & (epi_rate <= 0.1))
+    )
+    cardio = cardio.where(~score3, 3.0)
+
+    # Score 4: high catecholamine dose
+    score4 = (dop_rate > 15) | (norepi_rate > 0.1) | (epi_rate > 0.1)
+    cardio = cardio.where(~score4, 4.0)
+
+    # If neither MAP nor vaso information exists, keep missing.
+    has_cardio_data = map_val.notna() | (vaso_any > 0)
+    cardio = cardio.where(has_cardio_data, np.nan)
+
+    df[cardio_col] = cardio
 
     # --- CNS (GCS) ---
     if gcs_col in df.columns:
