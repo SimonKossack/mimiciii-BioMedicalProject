@@ -856,6 +856,7 @@ def get_labs_for_window(
     df_cohort: pd.DataFrame,
     window_hours: float = 24.0,
     agg: str = "worst",
+    end_hours_col: str | None = None,
 ) -> pd.DataFrame:
     """
     Retrieve lab values from ``labevents`` within ``[intime, intime + window_hours]``.
@@ -906,15 +907,31 @@ def get_labs_for_window(
 
     raw["lab"] = raw["itemid"].map(item_to_lab)
 
+    # Merge-Spalten: bei end_hours_col patientenspezifisches Fensterende einbeziehen
+    _merge_cols = ["hadm_id", "icustay_id", "intime"]
+    if end_hours_col is not None:
+        if end_hours_col not in df_cohort.columns:
+            raise ValueError(
+                f"Spalte '{end_hours_col}' fehlt in df_cohort. "
+                f"Sie sollte den patientenspezifischen Fensterende in Stunden enthalten "
+                f"(z.B. 'first_vaso_hours' aus der Vasopressor-Timing-Berechnung)."
+            )
+        _merge_cols.append(end_hours_col)
+
     merged = raw.merge(
-        df_cohort[["hadm_id", "icustay_id", "intime"]].drop_duplicates(),
+        df_cohort[_merge_cols].drop_duplicates(),
         on="hadm_id",
         how="inner",
     )
     merged["charttime"] = pd.to_datetime(merged["charttime"])
     merged["intime"] = pd.to_datetime(merged["intime"])
     merged["hours"] = (merged["charttime"] - merged["intime"]).dt.total_seconds() / 3600
-    merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= window_hours)]
+
+    # Zeitfilterung: fixes oder patientenspezifisches Fenster
+    if end_hours_col is not None:
+        merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= merged[end_hours_col])]
+    else:
+        merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= window_hours)]
 
     _WORST_MAX = {"creatinine", "bilirubin", "bun", "lactate", "wbc", "potassium"}
 
@@ -934,7 +951,8 @@ def get_labs_for_window(
         .unstack("lab")
     )
 
-    sfx = f"_{int(window_hours)}h"
+    # Suffix: patientenspezifisches Fenster → '_t_star', fixes Fenster → '_{N}h'
+    sfx = "_t_star" if end_hours_col is not None else f"_{int(window_hours)}h"
     result.columns = [c + sfx for c in result.columns]
     result = result.reset_index()
 
@@ -945,6 +963,7 @@ def get_vitals_for_window(
     df_cohort: pd.DataFrame,
     window_hours: float = 24.0,
     agg: str = "worst",
+    end_hours_col: str | None = None,
 ) -> pd.DataFrame:
     """
     Retrieve vital signs from ``chartevents`` within ``[intime, intime + window_hours]``.
@@ -990,15 +1009,31 @@ def get_vitals_for_window(
 
     raw["vital"] = raw["itemid"].map(item_to_vital)
 
+    # Merge-Spalten: bei end_hours_col patientenspezifisches Fensterende einbeziehen
+    _merge_cols_v = ["icustay_id", "intime"]
+    if end_hours_col is not None:
+        if end_hours_col not in df_cohort.columns:
+            raise ValueError(
+                f"Spalte '{end_hours_col}' fehlt in df_cohort. "
+                f"Sie sollte den patientenspezifischen Fensterende in Stunden enthalten "
+                f"(z.B. 'first_vaso_hours' aus der Vasopressor-Timing-Berechnung)."
+            )
+        _merge_cols_v.append(end_hours_col)
+
     merged = raw.merge(
-        df_cohort[["icustay_id", "intime"]].drop_duplicates(),
+        df_cohort[_merge_cols_v].drop_duplicates(),
         on="icustay_id",
         how="inner",
     )
     merged["charttime"] = pd.to_datetime(merged["charttime"])
     merged["intime"] = pd.to_datetime(merged["intime"])
     merged["hours"] = (merged["charttime"] - merged["intime"]).dt.total_seconds() / 3600
-    merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= window_hours)]
+
+    # Zeitfilterung: fixes oder patientenspezifisches Fenster
+    if end_hours_col is not None:
+        merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= merged[end_hours_col])]
+    else:
+        merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= window_hours)]
 
     _WORST_MIN = {"sbp", "dbp", "mbp", "gcs_total", "spo2"}
 
@@ -1018,7 +1053,8 @@ def get_vitals_for_window(
         .unstack("vital")
     )
 
-    sfx = f"_{int(window_hours)}h"
+    # Suffix: patientenspezifisches Fenster → '_t_star', fixes Fenster → '_{N}h'
+    sfx = "_t_star" if end_hours_col is not None else f"_{int(window_hours)}h"
     result.columns = [c + sfx for c in result.columns]
     result = result.reset_index()
 
@@ -1028,12 +1064,13 @@ def get_vitals_for_window(
 def get_urine_output_for_window(
     df_cohort: pd.DataFrame,
     window_hours: float = 24.0,
+    end_hours_col: str | None = None,
 ) -> pd.DataFrame:
     """
     Total urine output (mL) from ``outputevents`` within
-    ``[intime, intime + window_hours]``.
+    ``[intime, intime + window_hours]`` (oder patientenspezifisch bis ``end_hours_col``).
 
-    Returns df with new column ``uo_ml_<window_hours>h``.
+    Returns df with new column ``uo_ml_<window_hours>h`` (bzw. ``uo_ml_t_star``).
     """
     icu_ids = tuple(df_cohort["icustay_id"].dropna().astype(int).unique().tolist())
     if not icu_ids:
@@ -1055,23 +1092,42 @@ def get_urine_output_for_window(
           AND oe.value > 0
     """)
 
+    # Spaltenname für UO-Ergebnis
+    _uo_col = "uo_ml_t_star" if end_hours_col is not None else f"uo_ml_{int(window_hours)}h"
+
     if raw.empty:
         df_out = df_cohort.copy()
-        df_out[f"uo_ml_{int(window_hours)}h"] = np.nan
+        df_out[_uo_col] = np.nan
         return df_out
 
+    # Merge-Spalten: bei end_hours_col patientenspezifisches Fensterende einbeziehen
+    _merge_cols_uo = ["icustay_id", "intime"]
+    if end_hours_col is not None:
+        if end_hours_col not in df_cohort.columns:
+            raise ValueError(
+                f"Spalte '{end_hours_col}' fehlt in df_cohort. "
+                f"Sie sollte den patientenspezifischen Fensterende in Stunden enthalten "
+                f"(z.B. 'first_vaso_hours' aus der Vasopressor-Timing-Berechnung)."
+            )
+        _merge_cols_uo.append(end_hours_col)
+
     merged = raw.merge(
-        df_cohort[["icustay_id", "intime"]].drop_duplicates(),
+        df_cohort[_merge_cols_uo].drop_duplicates(),
         on="icustay_id",
         how="inner",
     )
     merged["charttime"] = pd.to_datetime(merged["charttime"])
     merged["intime"] = pd.to_datetime(merged["intime"])
     merged["hours"] = (merged["charttime"] - merged["intime"]).dt.total_seconds() / 3600
-    merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= window_hours)]
+
+    # Zeitfilterung: fixes oder patientenspezifisches Fenster
+    if end_hours_col is not None:
+        merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= merged[end_hours_col])]
+    else:
+        merged = merged[(merged["hours"] >= 0) & (merged["hours"] <= window_hours)]
 
     uo_total = merged.groupby("icustay_id")["value"].sum().reset_index()
-    uo_total = uo_total.rename(columns={"value": f"uo_ml_{int(window_hours)}h"})
+    uo_total = uo_total.rename(columns={"value": _uo_col})
 
     return df_cohort.merge(uo_total, on="icustay_id", how="left")
 
@@ -1079,6 +1135,7 @@ def get_urine_output_for_window(
 def compute_sofa_from_raw(
     df_cohort: pd.DataFrame,
     window_hours: float = 24.0,
+    end_hours_col: str | None = None,
 ) -> pd.DataFrame:
     """
     Compute SOFA total and component scores from raw MIMIC-III tables
@@ -1097,11 +1154,12 @@ def compute_sofa_from_raw(
       sofa_cardiovascular, sofa_cns, sofa_renal, sofa_total.
     """
     df = df_cohort.copy()
-    sfx = f"_{int(window_hours)}h"
+    # Suffix: patientenspezifisches Fenster → '_t_star', fixes Fenster → '_{N}h'
+    sfx = "_t_star" if end_hours_col is not None else f"_{int(window_hours)}h"
 
-    df = get_labs_for_window(df, window_hours=window_hours, agg="worst")
-    df = get_vitals_for_window(df, window_hours=window_hours, agg="worst")
-    df = get_urine_output_for_window(df, window_hours=window_hours)
+    df = get_labs_for_window(df, window_hours=window_hours, agg="worst", end_hours_col=end_hours_col)
+    df = get_vitals_for_window(df, window_hours=window_hours, agg="worst", end_hours_col=end_hours_col)
+    df = get_urine_output_for_window(df, window_hours=window_hours, end_hours_col=end_hours_col)
 
     pao2_col = f"pao2{sfx}"
     fio2_col = f"fio2_lab{sfx}"
@@ -1110,7 +1168,8 @@ def compute_sofa_from_raw(
     mbp_col = f"mbp{sfx}"
     gcs_col = f"gcs_total{sfx}"
     creat_col = f"creatinine{sfx}"
-    uo_col = f"uo_ml_{int(window_hours)}h"
+    # UO-Spaltenname konsistent mit get_urine_output_for_window
+    uo_col = "uo_ml_t_star" if end_hours_col is not None else f"uo_ml_{int(window_hours)}h"
 
     # --- Respiration (PaO2/FiO2) ---
     if pao2_col in df.columns and fio2_col in df.columns:
@@ -1191,5 +1250,73 @@ def compute_sofa_from_raw(
         f"sofa_renal{sfx}",
     ]
     df[f"sofa_total{sfx}"] = df[component_cols].sum(axis=1, min_count=1)
+
+    return df
+
+
+def add_sofa_at_intervention(
+    df: pd.DataFrame,
+    t_star_col: str,
+) -> pd.DataFrame:
+    """
+    Berechnet SOFA-Scores zum patientenspezifischen Interventionszeitpunkt t*.
+
+    Für jeden Patienten wird das Fenster [intime, intime + t*] verwendet,
+    wobei t* aus t_star_col (Stunden nach ICU-Aufnahme) entnommen wird.
+    Patienten ohne Intervention (NaN in t_star_col) erhalten NaN-Spalten.
+
+    Hinweis: Die UO-Normierung auf 24h erfolgt über den Standardwert
+    window_hours=24 in compute_sofa_from_raw. Bei sehr kurzem t* (<6h) ist
+    die Normierung eine Näherung.
+
+    Parameter
+    ----------
+    df : DataFrame
+        Muss icustay_id, hadm_id, subject_id, intime sowie t_star_col enthalten.
+    t_star_col : str
+        Spaltenname mit dem patientenspezifischen Interventionszeitpunkt in Stunden
+        nach ICU-Aufnahme (z.B. 'first_vaso_hours').
+
+    Rückgabe
+    --------
+    DataFrame mit neuen Spalten sofa_*_t_star und sofa_total_t_star.
+    Patienten ohne Intervention erhalten NaN in allen t_star-Spalten.
+    """
+    if t_star_col not in df.columns:
+        raise ValueError(
+            f"Spalte '{t_star_col}' fehlt in df. "
+            f"Sie sollte den Interventionszeitpunkt in Stunden nach ICU-Aufnahme enthalten "
+            f"(z.B. aus add_vasopressor_flags() oder einer Timing-Berechnung)."
+        )
+
+    df = df.copy()
+
+    # Erwartete t*-SOFA-Ausgabespalten
+    _t_star_sofa_cols = [
+        "sofa_respiration_t_star",
+        "sofa_coagulation_t_star",
+        "sofa_liver_t_star",
+        "sofa_cardiovascular_t_star",
+        "sofa_cns_t_star",
+        "sofa_renal_t_star",
+        "sofa_total_t_star",
+    ]
+
+    # Nur Patienten mit gültigem t* verarbeiten
+    mask = df[t_star_col].notna()
+
+    if not mask.any():
+        # Keine behandelten Patienten → alle Spalten auf NaN setzen
+        for col in _t_star_sofa_cols:
+            df[col] = np.nan
+        return df
+
+    # SOFA-Berechnung für behandelte Patienten mit patientenspezifischem Fenster
+    df_treated = df[mask].copy()
+    df_treated = compute_sofa_from_raw(df_treated, window_hours=24.0, end_hours_col=t_star_col)
+
+    # Nur die neuen t*-Spalten zurückmergen (verhindert Dopplung anderer Spalten)
+    new_cols = [c for c in df_treated.columns if c.endswith("_t_star")]
+    df = df.merge(df_treated[["icustay_id"] + new_cols], on="icustay_id", how="left")
 
     return df
